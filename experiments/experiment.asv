@@ -1,0 +1,150 @@
+%% Experiment ------------------------------------------------------
+% ----- Parameters -----
+textureOpacity0 = -0.6682*sqrt(-log(0.0084 + 90*(0.622-0.0084)/180)) + 1.4604;
+Screen('Drawtexture', window, mask_white, srcRect,[],[],[], textureOpacity0);
+Screen('Flip', window);
+
+recording_time_sec = 15*60;
+
+nb_exp = 1;
+time_lost = [];
+framerate_rec = [];
+angle = [];
+angle_pframe = zeros(1,2);
+angle_cum = [];
+angle_cum_filtered = [];
+angle_illum = [];
+textureOpacity = [];
+xin = 570 + (500-54)*cos(linspace(0,2*pi)); %virtual circle for finding the fish
+yin = 506 + (500-54)*sin(linspace(0,2*pi));
+
+i=0;
+disp('Recording')
+w = waitbar(0,'Recording');
+start(vid);
+timeStamprec0 = 0;
+
+% ----- Start recording -----
+while timeStamprec0 < recording_time_sec
+    i = i+1;
+    trigger(vid)
+    [img, timeStamprec0] = getdata(vid);
+    imb = imbinarize(imT-img,bwthresh);
+    fish = bwareaopen(imb,small);
+    [L,n] = bwlabel(fish);
+    area = bwarea(fish);
+    waitbar(timeStamprec0/recording_time_sec,w)
+    
+    % ----- if the fish is at the edge -----
+    if n ~= 1 || area < small+5
+        Screen('Drawtexture', window, mask_white, srcRect,[],[],[], textureOpacityini);
+        Screen('Flip', window);
+        disp('Start new sequence: 2min adaptation (at least) + swim recording')
+        framerate_rec(nb_exp) = i/timeStamprec0;
+        in = 0;
+        % ----- wait until fish returns in the center -----
+        while in == 0
+            trigger(vid)
+            [img, timeStamprec] = getdata(vid);
+            imb = imbinarize(imT-img,bwthresh);
+            fish = bwareaopen(imb,small);
+            [L,n] = bwlabel(fish);
+            area = bwarea(fish);
+            if area > small + 10
+                [fraw, fcol] = find(fish);
+                cy = round((max(fraw)-min(fraw))/2 + min(fraw));
+                cx = round((max(fcol)-min(fcol))/2 + min(fcol));
+                in = inpolygon(cx,cy,xin,yin);
+            end
+        end
+        % ----- adaptation 2 min at least -----
+        time_lost(nb_exp) = timeStamprec - timeStamprec0;
+        time_adapt = 2*60;
+        a = 0;
+        if time_lost(nb_exp) < time_adapt
+            pause(time_adapt - round(time_lost(nb_exp)));
+        end
+        i = 1;
+        nb_exp = nb_exp+1;
+    end
+    % ----- End adaptation if fish has been on the edge -----
+    
+    % ----- If the fish is in the center -----
+    % ----- get angle, filter, change illumination -----
+    [h, t, angle(nb_exp,i)] = get_orientation_distmap(fish);
+    if i == 1
+        d = 0;
+        angle_cum(nb_exp,i) = 90;
+    else
+        angle_prframe(1) = angle_pframe(2);
+        d = angle(nb_exp,i)-angle(nb_exp,i-1);
+        angle_pframe(2) = angle_per_frame(d);
+        if abs(angle_pframe(2)) > 150
+            angle_pframe(2) = angle_pframe(1);
+        end
+        angle_cum(nb_exp,i) = angle_cum(nb_exp,i-1) + angle_pframe(2);
+    end
+    % ----- smooth angle_pframe(i+1) according to its absolute value -----
+    if i > 8
+        d = mean(angle_cum(nb_exp,i-1:i)) - mean(angle_cum(nb_exp,i-2:i-1)); %écart de 5 frames
+        if abs(d) < di_angle_thresh
+            angle_cum_filtered(nb_exp,i) = angle_cum_filtered(nb_exp,i-1);
+        else
+            angle_cum_filtered(nb_exp,i) = mean(angle_cum(nb_exp,i-1:i));
+        end
+        
+        % ----- change illumination -----
+        dang = mean(angle_cum_filtered(nb_exp,i)) - mean(angle_cum_filtered(nb_exp,i-1));
+        if abs(dang) < di_angle_thresh
+            angle_illum(nb_exp,i) = angle_illum(nb_exp,i-1);
+        else
+            
+            angle_illum(nb_exp,i) =  mean(angle_cum_filtered(nb_exp,i));
+        end
+        
+        if angle_illum(nb_exp,i)-angle_illum(nb_exp,i-1) ~= 0
+            d = mod(angle_illum(nb_exp,i),360);
+            d = 180 - abs(180 - d);
+            X = 0.0084 + d*(0.622-0.0084)/180;
+            textureOpacity(nb_exp,i) = -0.6682*sqrt(-log(X)) + 1.4604;
+            if textureOpacity(nb_exp,i) < 0
+                textureOpacity(nb_exp,i) = 0;
+            elseif textureOpacity(nb_exp,i) > 1
+                textureOpacity(nb_exp,i) = 1;
+            end
+            if mod(i, waitframes)==0
+                Screen('Drawtexture', window, mask_white, srcRect,[],[],[], textureOpacity(nb_exp,i));
+                vbl = Screen('Flip', window, vbl + (waitframes - 0.5) * ifi);
+            end
+        else
+            textureOpacity(nb_exp,i) = textureOpacity(nb_exp,i-1);
+        end
+        
+    else %if i < 8
+        textureOpacity(nb_exp,i) = textureOpacity0;
+        angle_cum_filtered(nb_exp,i) = mean(angle_cum);
+        angle_illum(nb_exp,i) = angle_cum_filtered(nb_exp,i);
+    end
+    
+    [fraw, fcol] = find(fish);
+    cy = round((max(fraw)-min(fraw))/2 + min(fraw));
+    cx = round((max(fcol)-min(fcol))/2 + min(fcol));
+    centroids(i,:,nb_exp) = [cx cy];
+    if cy+40 > size(fish,1)
+        cy = size(fish,1)-40;
+    end
+    if cy-40 < 1
+        cy = 41;
+    end
+    if cx+40 > size(fish,2)
+        cx = size(fish,2)-40;
+    end
+    if cx-40 < 1
+        cx = 41;
+    end
+    fish_imbn(:,:,i,nb_exp) = fish(cy-40:cy+39,cx-40:cx+39);
+end
+
+disp('End recording')
+stop(vid)
+close all
